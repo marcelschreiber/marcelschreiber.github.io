@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>…</title>
+<meta name="description" content="nothing to see here">
+<meta name="theme-color" content="#05070a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2305070a'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23fff'/%3E%3C/svg%3E">
+<!-- social preview: og:image must be an absolute URL -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="…">
+<meta property="og:description" content="nothing to see here">
+<meta property="og:url" content="https://marcelschreiber.com/">
+<meta property="og:image" content="https://marcelschreiber.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="…">
+<meta name="twitter:description" content="nothing to see here">
+<meta name="twitter:image" content="https://marcelschreiber.com/og.png">
+<style>
+  html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  .tag {
+    position: fixed; left: 0; right: 0; bottom: 16px; text-align: center;
+    font: 12px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    letter-spacing: 0.32em; text-transform: lowercase;
+    color: #fff; opacity: 0.22; user-select: none; transition: opacity .4s;
+    width: max-content; margin: 0 auto; padding: 12px 18px; cursor: default;
+  }
+  .tag.swap { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="tag" id="tag">nothing to see here</div>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const SPACING = 13;         // grid pitch in css px (the "ordered" state)
+  const DRIFT = 46;           // how far particles wander from their cell when unobserved
+  const BASE_ALPHA = 0.045;   // almost invisible in the dark
+  const SECRET = 'hello';     // type this to make the grid spell it out
+  const CLICKS_UNTIL_ENOUGH = 15;
+
+  let W, H, DPR, parts = [];
+  let baseR = 150, rScale = 1, rScaleT = 1, R = 150;
+
+  const mouse = { x: -9999, y: -9999, active: false };
+  const cur = { x: -9999, y: -9999 };
+  const tilt = { on: false, x: 0, y: 0, t: -1e9 };
+  const ripples = [];
+  let lastInput = 0;
+  let hold = null;            // set while the pointer is pressed down
+  let clicks = 0;
+  let typed = '', msgStart = -1e9;
+
+  const smooth = (e0, e1, v) => {
+    const t = Math.min(1, Math.max(0, (v - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#05070a'; ctx.fillRect(0, 0, W, H);
+    baseR = Math.max(130, Math.min(W, H) * 0.2);
+
+    parts = [];
+    const cols = Math.ceil(W / SPACING) + 2, rows = Math.ceil(H / SPACING) + 2;
+    const ox = (W - (cols - 1) * SPACING) / 2, oy = (H - (rows - 1) * SPACING) / 2;
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+      const hx = ox + i * SPACING, hy = oy + j * SPACING;
+      parts.push({
+        hx, hy,
+        x: hx + (Math.random() - .5) * DRIFT * 2,
+        y: hy + (Math.random() - .5) * DRIFT * 2,
+        vx: 0, vy: 0,
+        dx: (Math.random() - .5) * DRIFT * 2,
+        dy: (Math.random() - .5) * DRIFT * 2,
+        a: BASE_ALPHA, s: 0.7 + Math.random() * 0.8, m: 0
+      });
+    }
+  }
+
+  // ---------- tagline: time-aware, swappable ----------
+  const tag = document.getElementById('tag');
+  const hour = new Date().getHours();
+  const baseLine = (hour >= 23 || hour < 4) ? "you're up late"
+                 : (hour >= 4 && hour < 7) ? 'too early for this'
+                 : 'nothing to see here';
+  tag.textContent = baseLine;
+  function setTag(text) {
+    tag.classList.add('swap');
+    setTimeout(() => { tag.textContent = text; tag.classList.remove('swap'); }, 400);
+  }
+
+  // triple-click the tagline to cycle through lines
+  const lines = [baseLine, 'you found nothing', 'or did you', 'stop clicking'];
+  let li = 0;
+  tag.addEventListener('click', e => {
+    if (e.detail !== 3) return;
+    li = (li + 1) % lines.length;
+    setTag(lines[li]);
+  });
+
+  // tab title: "…" while here, "come back" when the visitor leaves
+  document.addEventListener('visibilitychange', () => {
+    document.title = document.hidden ? 'come back' : '…';
+  });
+
+  // ---------- pointer: move, hold to charge, release for shockwave ----------
+  function point(e) {
+    mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true; lastInput = performance.now();
+    if (cur.x < -9000) { cur.x = mouse.x; cur.y = mouse.y; }
+  }
+  function release() {
+    if (!hold) return;
+    const now = performance.now();
+    const c = Math.min(1, Math.max(0, (now - hold.t0 - 200) / 1400));   // 0 for a plain click
+    hold = null;
+    ripples.push({
+      x: mouse.x, y: mouse.y, t0: now, r: 0, life: 1,
+      sp: 0.55 * (1 + c * 0.8), dur: 1800 + c * 1000, wd: 55 + c * 40, pow: 1 + c * 2.2
+    });
+    if (ripples.length > 4) ripples.shift();
+    if (++clicks === CLICKS_UNTIL_ENOUGH) setTag('ok, enough');
+  }
+  addEventListener('pointermove', point);
+  addEventListener('pointerdown', e => { point(e); hold = { t0: performance.now() }; });
+  addEventListener('pointerup', e => { point(e); release(); });
+  addEventListener('pointercancel', release);
+  addEventListener('pointerout', e => { if (!e.relatedTarget) mouse.active = false; });
+  addEventListener('resize', resize);
+
+  // scroll / wheel: grow and shrink the reveal radius
+  addEventListener('wheel', e => {
+    rScaleT = Math.min(2.4, Math.max(0.45, rScaleT * Math.exp(-e.deltaY * 0.0012)));
+  }, { passive: true });
+
+  // ---------- device tilt (phones): the reveal area follows the tilt ----------
+  function onTilt(e) {
+    if (e.gamma == null || e.beta == null) return;
+    const gx = Math.max(-1, Math.min(1, e.gamma / 30));
+    const gy = Math.max(-1, Math.min(1, (e.beta - 40) / 30));   // ~40deg = phone held naturally
+    tilt.x = W * (0.5 + gx * 0.5);
+    tilt.y = H * (0.5 + gy * 0.5);
+    tilt.t = performance.now(); tilt.on = true;
+  }
+  if (window.DeviceOrientationEvent) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      // iOS: needs a user gesture, so ask on the first tap
+      addEventListener('click', () => {
+        DeviceOrientationEvent.requestPermission()
+          .then(s => { if (s === 'granted') addEventListener('deviceorientation', onTilt); })
+          .catch(() => {});
+      }, { once: true });
+    } else {
+      addEventListener('deviceorientation', onTilt);
+    }
+  }
+
+  // ---------- easter egg: type the secret word ----------
+  function buildMask(word) {
+    const o = document.createElement('canvas'); o.width = W; o.height = H;
+    const c = o.getContext('2d');
+    const fs = Math.min(W / (word.length * 0.62), H * 0.4);
+    c.font = '900 ' + fs + 'px ui-sans-serif, system-ui, sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#fff';
+    c.fillText(word, W / 2, H / 2);
+    const d = c.getImageData(0, 0, W, H).data;
+    for (const p of parts) {
+      const ix = Math.round(p.hx), iy = Math.round(p.hy);
+      p.m = (ix >= 0 && iy >= 0 && ix < W && iy < H && d[(iy * W + ix) * 4 + 3] > 128) ? 1 : 0;
+    }
+  }
+  addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+    typed = (typed + e.key.toLowerCase()).slice(-SECRET.length);
+    if (typed === SECRET) { buildMask(SECRET); msgStart = performance.now(); typed = ''; }
+  });
+
+  // ---------- easter egg: for people who open the console ----------
+  console.log(
+    '%c' + [
+      '      _.-~~~~~~~~-._',
+      '   .-\'    .----.    \'-.',
+      '  <      ( (  ) )      >',
+      '   \'-.    \'----\'    .-\'',
+      '      \'-._.____._.-\'',
+      '',
+      '        why so curious?'
+    ].join('\n'),
+    'font-family: monospace; font-size: 13px; line-height: 1.2; color: #888;'
+  );
+
+  // ---------- main loop ----------
+  function frame(now) {
+    // cursor source: real pointer > device tilt > wandering ghost cursor
+    const pointerLive = hold || (mouse.active && now - lastInput < 6000);
+    if (!pointerLive) {
+      if (tilt.on && now - tilt.t < 1500) {
+        mouse.x = tilt.x; mouse.y = tilt.y;
+      } else {
+        const t = now / 1000;
+        mouse.x = W * (0.5 + 0.32 * Math.sin(t * 0.23) * Math.cos(t * 0.11));
+        mouse.y = H * (0.5 + 0.28 * Math.sin(t * 0.17 + 1.3));
+      }
+      if (cur.x < -9000) { cur.x = mouse.x; cur.y = mouse.y; }
+    }
+    cur.x += (mouse.x - cur.x) * 0.1;
+    cur.y += (mouse.y - cur.y) * 0.1;
+
+    rScale += (rScaleT - rScale) * 0.1;
+    R = baseR * rScale;
+    const pullR = R * 2.4;
+    const charge = (hold && !reduced) ? Math.min(1, Math.max(0, (now - hold.t0 - 200) / 1400)) : 0;
+
+    ctx.fillStyle = reduced ? '#05070a' : 'rgba(5,7,10,0.22)';
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const rp = ripples[i], age = now - rp.t0;
+      rp.r = age * rp.sp;
+      rp.life = 1 - age / rp.dur;
+      if (rp.life <= 0) ripples.splice(i, 1);
+    }
+
+    const age = now - msgStart;
+    const ml = age < 0 ? 0 : age < 600 ? age / 600 : age < 4600 ? 1 : age < 5800 ? 1 - (age - 4600) / 1200 : 0;
+
+    const wander = reduced ? 0 : 1;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      const d = Math.hypot(p.hx - cur.x, p.hy - cur.y);
+      let f = smooth(R, R * 0.35, d);            // 0 = dark & chaotic, 1 = lit & ordered
+      if (ml > 0 && p.m) f = Math.max(f, ml);    // secret word: its cells light up and lock in
+
+      // click ripples: an expanding ring that lights particles and shoves them outward
+      let boost = 0;
+      for (let j = 0; j < ripples.length; j++) {
+        const rp = ripples[j];
+        const rx = p.hx - rp.x, ry = p.hy - rp.y, rd = Math.hypot(rx, ry);
+        const diff = Math.abs(rd - rp.r);
+        if (diff < rp.wd) {
+          const w = (1 - diff / rp.wd) * rp.life;
+          boost += w;
+          if (!reduced) {
+            p.vx += (rx / (rd || 1)) * w * 1.8 * rp.pow;
+            p.vy += (ry / (rd || 1)) * w * 1.8 * rp.pow;
+          }
+        }
+      }
+
+      // hold to charge: particles are slowly drawn into the cursor
+      let g = 0;
+      if (charge > 0) {
+        g = charge * smooth(pullR, 0, d);
+        if (g > f) f = g;
+      }
+
+      // unobserved offset does a slow random walk; observation collapses it to zero
+      p.dx += (-p.dx * 0.012 + (Math.random() - .5) * 1.6) * wander;
+      p.dy += (-p.dy * 0.012 + (Math.random() - .5) * 1.6) * wander;
+      let tx = p.hx + p.dx * (1 - f), ty = p.hy + p.dy * (1 - f);
+      if (g > 0) { const k2 = g * 0.9; tx += (cur.x - tx) * k2; ty += (cur.y - ty) * k2; }
+
+      const k = 0.035 + f * 0.09;
+      p.vx = (p.vx + (tx - p.x) * k) * 0.82;
+      p.vy = (p.vy + (ty - p.y) * k) * 0.82;
+      p.x += p.vx; p.y += p.vy;
+
+      const target = Math.min(1, BASE_ALPHA + f * 0.9 + boost * 0.9);
+      p.a += (target - p.a) * 0.12;
+      if (p.a < 0.02) continue;
+
+      ctx.fillStyle = 'rgba(255,255,255,' + p.a.toFixed(3) + ')';
+      const s = p.s + f * 0.4 + boost * 0.8;
+      ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
